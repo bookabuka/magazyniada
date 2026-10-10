@@ -1,3 +1,4 @@
+
 with Ada.Text_IO;  use Ada.Text_IO;
 with Ada.Calendar; use Ada.Calendar;
 with Ada.Numerics.Float_Random;
@@ -8,6 +9,8 @@ procedure Magazyniada is
    Tick        : constant Duration := 0.1;
 
    subtype Robot_Id is Positive range 1 .. 2;
+
+   type Robot_States is array (Robot_Id) of Boolean; -- [G] Statusy robotow
 
    type Goods is (Koperty, Paczki, Palety);
    type Stock is array (Goods) of Natural;
@@ -44,7 +47,8 @@ procedure Magazyniada is
       T   : constant Natural := Natural ((Clock - T0) * 10);
       Sec : constant String  := Img (T / 10);
    begin
-      return "[" & (if Sec'Length < 2 then "0" else "") & Sec & "." & Img (T mod 10) & "]";
+      return "[" & (if Sec'Length < 2 then "0" else "") &
+             Sec & "." & Img (T mod 10) & "]";
    end Stamp;
 
    procedure Log (Msg : String) is
@@ -66,7 +70,11 @@ procedure Magazyniada is
             FR.Reset (Gen);
             Ready := True;
          end if;
-         N := Integer'Min (Hi, Lo + Integer (Float'Floor (FR.Random (Gen) * Float (Hi - Lo + 1))));
+
+         N := Integer'Min
+           (Hi, Lo + Integer
+              (Float'Floor
+                 (FR.Random (Gen) * Float (Hi - Lo + 1))));
       end Roll;
    end Dice;
 
@@ -93,11 +101,17 @@ procedure Magazyniada is
       entry Init  (N : Robot_Id);
       entry Carry (C : Cargo);
    end Robot;
+
    Robots : array (Robot_Id) of Robot;
 
    task Warehouse is
-      entry Store  (K : Goods; N : Positive);
+      entry Store (K : Goods; N : Positive);
       entry Status (S : out Stock);
+
+      -- [G] Odczyt licznika i statusow robotow
+      entry Get_Count (N : out Natural);
+      entry Set_Robot_State (R : Robot_Id; Free : Boolean);
+      entry Get_Robot_States (S : out Robot_States);
    end Warehouse;
 
    task type Truck (Id : Positive);
@@ -114,6 +128,7 @@ procedure Magazyniada is
                null;
             end select;
          end loop;
+
          delay Tick;
       end loop;
    end Send_To_Robot;
@@ -129,7 +144,9 @@ procedure Magazyniada is
                Log ("Zakonczono rozladunek D" & Img (D.Id));
                Load := D;
             end Arrive;
+
             Send_To_Robot (Load);
+
          or
             terminate;
          end select;
@@ -145,6 +162,7 @@ procedure Magazyniada is
       begin
          Log ("Robot R" & Img (Id) & " " & Msg);
       end Say;
+
    begin
       accept Init (N : Robot_Id) do
          Id := N;
@@ -156,48 +174,120 @@ procedure Magazyniada is
                Job := C;
                Say ("otrzymal " & Img (C));
             end Carry;
+
+            Warehouse.Set_Robot_State (Id, False); -- [G] Zajety
+
          or
             terminate;
          end select;
 
          Say ("jedzie do magazynu");
          Pause (30, 60);
+
          Warehouse.Store (Job.Kind, Job.Count);
          Warehouse.Status (S);
+
          Say ("dostarczyl towar (magazyn: " & Img (S) & ")");
+
+         Warehouse.Set_Robot_State (Id, True); -- [G] Wolny
          Say ("jest ponownie wolny");
       end loop;
    end Robot;
 
    task body Warehouse is
       Items : Stock := (others => 0);
+      Delivered_Count : Natural := 0; -- [G] Licznik dostaw
+      States : Robot_States := (others => True); -- [G] Statusy robotow
+
    begin
       loop
          select
             accept Store (K : Goods; N : Positive) do
                Items (K) := Items (K) + N;
+               Delivered_Count := Delivered_Count + 1; -- [G] Nowa dostawa
             end Store;
+
          or
             accept Status (S : out Stock) do
                S := Items;
             end Status;
+
+         or
+            accept Get_Count (N : out Natural) do
+               N := Delivered_Count;
+            end Get_Count;
+
+         or
+            accept Set_Robot_State
+              (R : Robot_Id; Free : Boolean) do
+               States (R) := Free;
+            end Set_Robot_State;
+
+         or
+            accept Get_Robot_States (S : out Robot_States) do
+               S := States;
+            end Get_Robot_States;
+
          or
             terminate;
          end select;
       end loop;
    end Warehouse;
 
-   task body Truck is
-      D : constant Cargo := (Id, Random_Goods, Random_In (1, 10));
+   -- [G] Monitor centrum logistycznego
+
+   task Monitor;
+
+   task body Monitor is
+      S        : Stock;
+      Count    : Natural := 0;
+      Statuses : Robot_States;
+
    begin
-      Log ("Przyjazd samochodu D" & Img (Id) & ": " & Img (D));
+      Put_Line ("stan magazynu:");
+
+      loop
+         -- Pobranie aktualnych danych
+         Warehouse.Status (S);
+         Warehouse.Get_Count (Count);
+         Warehouse.Get_Robot_States (Statuses);
+
+         Put_Line(" ");
+         Put_Line("=====MONITOR=====");
+         Log ("stan magazynu: " & Img (S));
+         Log ("dostarczone ladunki: " & Img (Count));
+
+         -- Status obu robotow
+         for R in Robot_Id loop
+            Log ("Robot R" & Img (R) & ": " &
+                 (if Statuses (R) then "Wolny" else "Zajety"));
+         end loop;
+         Put_Line("=================");
+         Put_Line(" ");
+
+         exit when Count = Truck_Count; -- [G] Do zmiany przy module H
+         delay 3.0;
+      end loop;
+
+   end Monitor;
+
+   task body Truck is
+      D : constant Cargo :=
+        (Id, Random_Goods, Random_In (1, 10));
+
+   begin
+      Log ("Przyjazd samochodu D" & Img (Id) &
+           ": " & Img (D));
+
       Log ("D" & Img (Id) & " oczekuje na rozladunek");
+
       Dock.Arrive (D);
    end Truck;
 
    task body Arrivals is
       type Truck_Ref is access Truck;
       Ref : Truck_Ref;
+
    begin
       for I in 1 .. Truck_Count loop
          Pause (5, 40);
@@ -207,7 +297,9 @@ procedure Magazyniada is
 
 begin
    Log ("Start symulacji");
+
    for R in Robot_Id loop
       Robots (R).Init (R);
    end loop;
+
 end Magazyniada;
